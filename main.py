@@ -29,6 +29,18 @@ def format_time(seconds):
         return f"{seconds // 60:02d}m:{seconds % 60:02d}s"
     return f"{seconds // 3600:02d}h:{(seconds % 3600) // 60:02d}m:{seconds % 60:02d}s"
 
+def format_bytes(size_in_bytes):
+    """Converts raw bytes into a precise human-readable string with decimals."""
+    if size_in_bytes == 0:
+        return "0.00 B"
+    
+    # Standard decimal conversions
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_in_bytes < 1024.0:
+            return f"{size_in_bytes:.2f} {unit}"
+        size_in_bytes /= 1024.0
+    return f"{size_in_bytes:.2f} PB"
+
 async def get_bunny_video_id(title, library_id, api_key):
     url = f"https://video.bunnycdn.com/library/{library_id}/videos"
     headers = {
@@ -89,6 +101,7 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
         async with session.put(url, headers=headers, data=data_pipe_generator()) as resp:
             return resp.status == 200
 
+# --- UPDATED EXTRACTION ENGINE WITH INDIVIDUAL FILE SIZE MAPPING ---
 def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
     output = ""
     indent = "    " * indent_level
@@ -96,9 +109,13 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
     try:
         with zipfile.ZipFile(file_bytes) as z:
             for member in z.infolist():
+                # Ignore pure directory structural markers
                 if member.is_dir():
                     continue
+                    
                 filename = member.filename
+                
+                # Check for inner nested zip containers
                 if filename.lower().endswith('.zip'):
                     output += f"{indent}{current_index[0]}. 📁 `{filename}` **(Nested Zip Found -> Extracting... )**\n"
                     current_index[0] += 1
@@ -106,13 +123,15 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
                         nested_bytes = io.BytesIO(nested_file.read())
                         output += extract_and_map_zip(nested_bytes, indent_level + 1, current_index)
                 else:
-                    output += f"{indent}{current_index[0]}. 📄 `{filename}`\n"
+                    # Fetch raw uncompressed entry size from zip headers and format it with decimals
+                    readable_size = format_bytes(member.file_size)
+                    output += f"{indent}{current_index[0]}. 📄 `{filename}` — `({readable_size})`\n"
                     current_index[0] += 1
     except zipfile.BadZipFile:
         output += f"{indent}⚠️ _[Error: Corrupted or encrypted inner zip file encountered]_\n"
     return output
 
-# --- CORE EVENT HANDLER WITH FIXED BULLETPROOF RAM DOWNLOADER ---
+# --- CORE EVENT HANDLER ---
 @client.on(events.NewMessage())
 async def handle_userbot_media(event):
     message = event.message
@@ -131,13 +150,11 @@ async def handle_userbot_media(event):
             start_time = time.time()
             downloaded_bytes = 0
             
-            # Streaming download with large 2MB buffers for maximum delivery speeds
             async for chunk in client.iter_download(message.media, chunk_size=2 * 1024 * 1024):
                 buffer.write(chunk)
                 downloaded_bytes += len(chunk)
                 
                 now = time.time()
-                # Strictly throttled to 4.5s to completely safeguard against rate limiting blocks
                 if now - last_update_time > 4.5 or downloaded_bytes == total_size:
                     pct = (downloaded_bytes / total_size) * 100
                     bar = generate_progress_bar(pct)
@@ -163,7 +180,7 @@ async def handle_userbot_media(event):
             
             buffer.seek(0)
             
-            await client.edit_message(event.chat_id, status_msg.id, "⚙️ **Extracting layers and compiling deep file tree map...**")
+            await client.edit_message(event.chat_id, status_msg.id, "⚙️ **Extracting layers and compiling deep size-mapped tree...**")
             file_tree = extract_and_map_zip(buffer)
             
             final_output = f"📦 **Deep ZIP Extraction Map for:** `{filename}`\n\n"
@@ -173,7 +190,6 @@ async def handle_userbot_media(event):
                 final_output = final_output[:4000] + "\n\n⚠️ *[Structure truncated]*"
             await client.edit_message(event.chat_id, status_msg.id, final_output)
             
-            # Clean memory space instantly
             buffer.close()
             del buffer
             gc.collect()
@@ -201,7 +217,7 @@ async def main():
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Engine online. Multi-megabyte sequential download streams active with native object safety features!"
+            "Precision size tracking added. Tree maps will now format individual file weights automatically!"
         )
         print("✅ Startup ping successfully dispatched.")
     except Exception as e:
