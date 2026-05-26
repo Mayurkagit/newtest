@@ -31,8 +31,8 @@ jobs:
         BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
         TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
       run: |
-        # Decodes the hex string variable from your GitHub Secret back into the binary SQLite database
-        echo "$TELEGRAM_SESSION" | xxd -r -p > bunny_pipeline_bot.session
+        # Safely decode the compressed Base64 string and restore the binary database file
+        echo "$TELEGRAM_SESSION" | base64 -d | gunzip > bunny_pipeline_bot.session
         
         # Launch the userbot script
         python main.py
