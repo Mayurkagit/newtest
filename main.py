@@ -5,8 +5,7 @@ import zipfile
 import aiohttp
 import asyncio
 import gc  # Garbage collection to explicitly clean RAM
-from telethon import TelegramClient, events
-from telethon.tl.types import InputDocumentFileLocation
+from telethon import TelegramClient, events, functions  # Added functions import
 
 # ==================== CONFIGURATION ====================
 API_ID = int(os.environ.get("API_ID", 1234567))
@@ -24,7 +23,6 @@ def generate_progress_bar(percentage, length=15):
     return '█' * filled_length + '░' * (length - filled_length)
 
 def format_time(seconds):
-    """Formats raw seconds into human readable MM:SS or HH:MM:SS text blocks."""
     if seconds is None or seconds < 0:
         return "Calculating..."
     seconds = int(seconds)
@@ -65,14 +63,12 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
             uploaded_bytes += len(chunk)
             
             now = time.time()
-            # Throttled to 4.5 seconds to prevent rate limit blocks
             if now - last_update_time > 4.5 or uploaded_bytes == total_size:
                 pct = (uploaded_bytes / total_size) * 100
                 bar = generate_progress_bar(pct)
                 elapsed = now - start_time
-                speed = uploaded_bytes / elapsed if elapsed > 0 else 0  # Bytes per second
+                speed = uploaded_bytes / elapsed if elapsed > 0 else 0
                 
-                # Calculate ETA metrics
                 remaining_bytes = total_size - uploaded_bytes
                 eta = remaining_bytes / speed if speed > 0 else 0
                 
@@ -96,7 +92,7 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
 
 def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
     output = ""
-    indent = "    " * indent_level
+    indent = "    " * indent_level
     
     try:
         with zipfile.ZipFile(file_bytes) as z:
@@ -117,7 +113,7 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
         output += f"{indent}⚠️ _[Error: Corrupted or encrypted inner zip file encountered]_\n"
     return output
 
-# --- HIGH SPEED PARALLEL DOWNLOAD WITH DYNAMIC TIMERS & ETA ---
+# --- FIXED HIGH SPEED PARALLEL DOWNLOAD WITH CORRECT METHOD PATH ---
 async def fast_parallel_download(client, message, status_msg, event):
     total_size = message.file.size
     chunk_size = 1024 * 1024  # 1MB Chunks
@@ -149,7 +145,8 @@ async def fast_parallel_download(client, message, status_msg, event):
             except asyncio.QueueEmpty:
                 break
                 
-            result = await client(TelegramClient.GetFileRequest(
+            # FIXED: Corrected path using functions.upload.GetFileRequest
+            result = await client(functions.upload.GetFileRequest(
                 location=file_location,
                 offset=offset,
                 limit=chunk_size
@@ -160,12 +157,11 @@ async def fast_parallel_download(client, message, status_msg, event):
             queue.task_done()
             
             now = time.time()
-            # Strictly limited to 4.5 seconds threshold to remain safe from rate limits
             if now - last_update_time > 4.5 or downloaded_bytes == total_size:
                 pct = (downloaded_bytes / total_size) * 100
                 bar = generate_progress_bar(pct)
                 elapsed = now - start_time
-                speed = downloaded_bytes / elapsed if elapsed > 0 else 0  # Bytes per second
+                speed = downloaded_bytes / elapsed if elapsed > 0 else 0
                 
                 remaining_bytes = total_size - downloaded_bytes
                 eta = remaining_bytes / speed if speed > 0 else 0
@@ -215,7 +211,6 @@ async def handle_userbot_media(event):
                 final_output = final_output[:4000] + "\n\n⚠️ *[Structure truncated]*"
             await client.edit_message(event.chat_id, status_msg.id, final_output)
             
-            # --- RAM RELEASING SEQUENCES ---
             buffer.close()
             del buffer
             gc.collect()
@@ -243,7 +238,7 @@ async def main():
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Parallel tracking engine loaded. Timers & ETA tracking metrics active safely without rate limits!"
+            "Parallel tracking engine corrected. Ready to process files!"
         )
         print("✅ Startup ping successfully dispatched.")
     except Exception as e:
