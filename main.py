@@ -98,10 +98,12 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
         output += f"{indent}⚠️ _[Error: Corrupted or encrypted inner zip file encountered]_\n"
     return output
 
-# --- CORE EVENT HANDLER FOR OUTGOING MEDIA ---
-@client.on(events.NewMessage(outgoing=True))
+# --- CHANGED: Listens to ALL messages (incoming, outgoing, and forwards) ---
+@client.on(events.NewMessage())
 async def handle_userbot_media(event):
     message = event.message
+    
+    # Only process if the message contains an actual media file attachment
     if not message.file:
         return
 
@@ -109,6 +111,7 @@ async def handle_userbot_media(event):
     ext = os.path.splitext(filename)[1].lower() if '.' in filename else ""
     total_size = message.file.size
 
+    # --- FEATURE 1: ZIP EXTRACTION MAP ---
     if ext == '.zip':
         status_msg = await event.reply("📥 **Feature 1: Downloading Zip to RAM for Deep Extraction...**")
         try:
@@ -129,6 +132,7 @@ async def handle_userbot_media(event):
         except Exception as e:
             await client.edit_message(event.chat_id, status_msg.id, f"❌ **Extraction failed:** `{str(e)}`")
 
+    # --- FEATURE 2: VIDEO PIPE STREAMING ---
     elif ext in ['.mp4', '.mkv', '.ts', '.mov', '.avi', '.webm', '.flv']:
         status_msg = await event.reply(f"🎬 **Feature 2: Initializing Pipe for:** `{filename}`")
         video_id = await get_bunny_video_id(filename, BUNNY_LIBRARY_ID, BUNNY_API_KEY)
@@ -147,12 +151,11 @@ async def main():
     print("⚡ Userbot initializing connection...")
     await client.start()
     
-    # Sends a confirmation text ping straight into your personal Saved Messages cloud
     try:
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Ready to process incoming data streams. Drop your `.zip` trees or raw video media files here to start pipeline."
+            "Now accepting both incoming, outgoing, and forwarded media streams!"
         )
         print("✅ Startup ping successfully dispatched to Saved Messages.")
     except Exception as e:
@@ -160,6 +163,5 @@ async def main():
         
     await client.run_until_disconnected()
 
-# Fire execution
 if __name__ == '__main__':
     client.loop.run_until_complete(main())
