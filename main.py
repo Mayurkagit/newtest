@@ -3,7 +3,10 @@ import io
 import time
 import zipfile
 import aiohttp
+import asyncio
+import gc  # Garbage collection to explicitly clean RAM
 from telethon import TelegramClient, events
+from telethon.tl.types import InputDocumentFileLocation
 
 # ==================== CONFIGURATION ====================
 API_ID = int(os.environ.get("API_ID", 1234567))
@@ -19,6 +22,15 @@ client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 def generate_progress_bar(percentage, length=15):
     filled_length = int(length * percentage // 100)
     return '█' * filled_length + '░' * (length - filled_length)
+
+def format_time(seconds):
+    """Formats raw seconds into human readable MM:SS or HH:MM:SS text blocks."""
+    if seconds is None or seconds < 0:
+        return "Calculating..."
+    seconds = int(seconds)
+    if seconds < 3600:
+        return f"{seconds // 60:02d}m:{seconds % 60:02d}s"
+    return f"{seconds // 3600:02d}h:{(seconds % 3600) // 60:02d}m:{seconds % 60:02d}s"
 
 async def get_bunny_video_id(title, library_id, api_key):
     url = f"https://video.bunnycdn.com/library/{library_id}/videos"
@@ -53,17 +65,24 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
             uploaded_bytes += len(chunk)
             
             now = time.time()
-            if now - last_update_time > 3.5 or uploaded_bytes == total_size:
+            # Throttled to 4.5 seconds to prevent rate limit blocks
+            if now - last_update_time > 4.5 or uploaded_bytes == total_size:
                 pct = (uploaded_bytes / total_size) * 100
                 bar = generate_progress_bar(pct)
                 elapsed = now - start_time
-                speed = (uploaded_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                speed = uploaded_bytes / elapsed if elapsed > 0 else 0  # Bytes per second
+                
+                # Calculate ETA metrics
+                remaining_bytes = total_size - uploaded_bytes
+                eta = remaining_bytes / speed if speed > 0 else 0
                 
                 status_text = (
                     f"⚡ **Feature 2: Piped Streaming Active**\n"
                     f"`[{bar}]` {pct:.2f}%\n\n"
                     f"⚙️ **Progress:** {uploaded_bytes / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB\n"
-                    f"🚀 **Speed:** {speed:.2f} MB/s"
+                    f"🚀 **Speed:** {(speed / (1024*1024)):.2f} MB/s\n"
+                    f"⏱️ **Elapsed Time:** {format_time(elapsed)}\n"
+                    f"⏳ **Estimated Remaining (ETA):** {format_time(eta)}"
                 )
                 try:
                     await client.edit_message(message.chat_id, status_msg.id, status_text)
@@ -77,7 +96,7 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
 
 def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
     output = ""
-    indent = "    " * indent_level
+    indent = "    " * indent_level
     
     try:
         with zipfile.ZipFile(file_bytes) as z:
@@ -98,12 +117,82 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
         output += f"{indent}⚠️ _[Error: Corrupted or encrypted inner zip file encountered]_\n"
     return output
 
-# --- CHANGED: Listens to ALL messages (incoming, outgoing, and forwards) ---
+# --- HIGH SPEED PARALLEL DOWNLOAD WITH DYNAMIC TIMERS & ETA ---
+async def fast_parallel_download(client, message, status_msg, event):
+    total_size = message.file.size
+    chunk_size = 1024 * 1024  # 1MB Chunks
+    concurrency = 8           # Parallel download streams
+    
+    file_location = InputDocumentFileLocation(
+        id=message.media.document.id,
+        access_hash=message.media.document.access_hash,
+        file_reference=message.media.document.file_reference,
+        thumb_size=""
+    )
+    
+    downloaded_buffer = bytearray(total_size)
+    offsets = list(range(0, total_size, chunk_size))
+    
+    downloaded_bytes = 0
+    last_update_time = time.time()
+    start_time = time.time()
+    
+    queue = asyncio.Queue()
+    for offset in offsets:
+        queue.put_nowait(offset)
+        
+    async def worker():
+        nonlocal downloaded_bytes, last_update_time
+        while not queue.empty():
+            try:
+                offset = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+                
+            result = await client(TelegramClient.GetFileRequest(
+                location=file_location,
+                offset=offset,
+                limit=chunk_size
+            ))
+            
+            downloaded_buffer[offset:offset+len(result.bytes)] = result.bytes
+            downloaded_bytes += len(result.bytes)
+            queue.task_done()
+            
+            now = time.time()
+            # Strictly limited to 4.5 seconds threshold to remain safe from rate limits
+            if now - last_update_time > 4.5 or downloaded_bytes == total_size:
+                pct = (downloaded_bytes / total_size) * 100
+                bar = generate_progress_bar(pct)
+                elapsed = now - start_time
+                speed = downloaded_bytes / elapsed if elapsed > 0 else 0  # Bytes per second
+                
+                remaining_bytes = total_size - downloaded_bytes
+                eta = remaining_bytes / speed if speed > 0 else 0
+                
+                status_text = (
+                    f"🚀 **Feature 1: Parallel Turbo-Downloading Zip to RAM...**\n"
+                    f"`[{bar}]` {pct:.2f}%\n\n"
+                    f"⚙️ **Progress:** {downloaded_bytes / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB\n"
+                    f"⚡ **Speed:** {(speed / (1024*1024)):.2f} MB/s\n"
+                    f"⏱️ **Elapsed Time:** {format_time(elapsed)}\n"
+                    f"⏳ **Estimated Remaining (ETA):** {format_time(eta)}"
+                )
+                try:
+                    await client.edit_message(event.chat_id, status_msg.id, status_text)
+                except Exception:
+                    pass
+                last_update_time = now
+
+    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+    await asyncio.gather(*workers)
+    
+    return io.BytesIO(downloaded_buffer)
+
+# --- CORE EVENT HANDLER ---
 @client.on(events.NewMessage())
 async def handle_userbot_media(event):
     message = event.message
-    
-    # Only process if the message contains an actual media file attachment
     if not message.file:
         return
 
@@ -111,14 +200,10 @@ async def handle_userbot_media(event):
     ext = os.path.splitext(filename)[1].lower() if '.' in filename else ""
     total_size = message.file.size
 
-    # --- FEATURE 1: ZIP EXTRACTION MAP ---
     if ext == '.zip':
-        status_msg = await event.reply("📥 **Feature 1: Downloading Zip to RAM for Deep Extraction...**")
+        status_msg = await event.reply("📥 **Feature 1: Initializing Turbo Parallel Connections...**")
         try:
-            buffer = io.BytesIO()
-            async for chunk in client.iter_download(message.media):
-                buffer.write(chunk)
-            buffer.seek(0)
+            buffer = await fast_parallel_download(client, message, status_msg, event)
             
             await client.edit_message(event.chat_id, status_msg.id, "⚙️ **Extracting layers and compiling deep file tree map...**")
             file_tree = extract_and_map_zip(buffer)
@@ -129,10 +214,15 @@ async def handle_userbot_media(event):
             if len(final_output) > 4096:
                 final_output = final_output[:4000] + "\n\n⚠️ *[Structure truncated]*"
             await client.edit_message(event.chat_id, status_msg.id, final_output)
+            
+            # --- RAM RELEASING SEQUENCES ---
+            buffer.close()
+            del buffer
+            gc.collect()
+            
         except Exception as e:
             await client.edit_message(event.chat_id, status_msg.id, f"❌ **Extraction failed:** `{str(e)}`")
 
-    # --- FEATURE 2: VIDEO PIPE STREAMING ---
     elif ext in ['.mp4', '.mkv', '.ts', '.mov', '.avi', '.webm', '.flv']:
         status_msg = await event.reply(f"🎬 **Feature 2: Initializing Pipe for:** `{filename}`")
         video_id = await get_bunny_video_id(filename, BUNNY_LIBRARY_ID, BUNNY_API_KEY)
@@ -146,21 +236,18 @@ async def handle_userbot_media(event):
         else:
             await client.edit_message(event.chat_id, status_msg.id, f"❌ **Pipeline failed mid-stream for:** `{filename}`")
 
-# --- STARTUP TRIGGER ---
 async def main():
     print("⚡ Userbot initializing connection...")
     await client.start()
-    
     try:
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Now accepting both incoming, outgoing, and forwarded media streams!"
+            "Parallel tracking engine loaded. Timers & ETA tracking metrics active safely without rate limits!"
         )
-        print("✅ Startup ping successfully dispatched to Saved Messages.")
+        print("✅ Startup ping successfully dispatched.")
     except Exception as e:
         print(f"⚠️ Could not dispatch startup ping message: {e}")
-        
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
