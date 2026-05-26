@@ -5,7 +5,7 @@ import zipfile
 import aiohttp
 import asyncio
 import gc  # Garbage collection to explicitly clean RAM
-from telethon import TelegramClient, events, functions  # Added functions import
+from telethon import TelegramClient, events, functions, utils  # Added utils for safe conversion
 
 # ==================== CONFIGURATION ====================
 API_ID = int(os.environ.get("API_ID", 1234567))
@@ -113,18 +113,14 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
         output += f"{indent}⚠️ _[Error: Corrupted or encrypted inner zip file encountered]_\n"
     return output
 
-# --- FIXED HIGH SPEED PARALLEL DOWNLOAD WITH CORRECT METHOD PATH ---
+# --- FIXED PARALLEL ENGINE: SAFELY MAPS LOCATION VIA UTILS ---
 async def fast_parallel_download(client, message, status_msg, event):
     total_size = message.file.size
     chunk_size = 1024 * 1024  # 1MB Chunks
-    concurrency = 8           # Parallel download streams
+    concurrency = 8           # Parallel streams
     
-    file_location = InputDocumentFileLocation(
-        id=message.media.document.id,
-        access_hash=message.media.document.access_hash,
-        file_reference=message.media.document.file_reference,
-        thumb_size=""
-    )
+    # FIX: Uses Telethon's built-in safe conversion utility directly on media object
+    file_location, file_type = utils.get_input_location(message.media)
     
     downloaded_buffer = bytearray(total_size)
     offsets = list(range(0, total_size, chunk_size))
@@ -145,7 +141,6 @@ async def fast_parallel_download(client, message, status_msg, event):
             except asyncio.QueueEmpty:
                 break
                 
-            # FIXED: Corrected path using functions.upload.GetFileRequest
             result = await client(functions.upload.GetFileRequest(
                 location=file_location,
                 offset=offset,
@@ -238,7 +233,7 @@ async def main():
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Parallel tracking engine corrected. Ready to process files!"
+            "Parallel tracking engine fully corrected with auto-mapping location utilities. Try running it now!"
         )
         print("✅ Startup ping successfully dispatched.")
     except Exception as e:
