@@ -3,9 +3,8 @@ import io
 import time
 import zipfile
 import aiohttp
-import asyncio
 import gc  # Garbage collection to explicitly clean RAM
-from telethon import TelegramClient, events, functions, utils  # Added utils for safe conversion
+from telethon import TelegramClient, events
 
 # ==================== CONFIGURATION ====================
 API_ID = int(os.environ.get("API_ID", 1234567))
@@ -113,74 +112,7 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
         output += f"{indent}⚠️ _[Error: Corrupted or encrypted inner zip file encountered]_\n"
     return output
 
-# --- FIXED PARALLEL ENGINE: SAFELY MAPS LOCATION VIA UTILS ---
-async def fast_parallel_download(client, message, status_msg, event):
-    total_size = message.file.size
-    chunk_size = 1024 * 1024  # 1MB Chunks
-    concurrency = 8           # Parallel streams
-    
-    # FIX: Uses Telethon's built-in safe conversion utility directly on media object
-    file_location, file_type = utils.get_input_location(message.media)
-    
-    downloaded_buffer = bytearray(total_size)
-    offsets = list(range(0, total_size, chunk_size))
-    
-    downloaded_bytes = 0
-    last_update_time = time.time()
-    start_time = time.time()
-    
-    queue = asyncio.Queue()
-    for offset in offsets:
-        queue.put_nowait(offset)
-        
-    async def worker():
-        nonlocal downloaded_bytes, last_update_time
-        while not queue.empty():
-            try:
-                offset = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-                
-            result = await client(functions.upload.GetFileRequest(
-                location=file_location,
-                offset=offset,
-                limit=chunk_size
-            ))
-            
-            downloaded_buffer[offset:offset+len(result.bytes)] = result.bytes
-            downloaded_bytes += len(result.bytes)
-            queue.task_done()
-            
-            now = time.time()
-            if now - last_update_time > 4.5 or downloaded_bytes == total_size:
-                pct = (downloaded_bytes / total_size) * 100
-                bar = generate_progress_bar(pct)
-                elapsed = now - start_time
-                speed = downloaded_bytes / elapsed if elapsed > 0 else 0
-                
-                remaining_bytes = total_size - downloaded_bytes
-                eta = remaining_bytes / speed if speed > 0 else 0
-                
-                status_text = (
-                    f"🚀 **Feature 1: Parallel Turbo-Downloading Zip to RAM...**\n"
-                    f"`[{bar}]` {pct:.2f}%\n\n"
-                    f"⚙️ **Progress:** {downloaded_bytes / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB\n"
-                    f"⚡ **Speed:** {(speed / (1024*1024)):.2f} MB/s\n"
-                    f"⏱️ **Elapsed Time:** {format_time(elapsed)}\n"
-                    f"⏳ **Estimated Remaining (ETA):** {format_time(eta)}"
-                )
-                try:
-                    await client.edit_message(event.chat_id, status_msg.id, status_text)
-                except Exception:
-                    pass
-                last_update_time = now
-
-    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
-    await asyncio.gather(*workers)
-    
-    return io.BytesIO(downloaded_buffer)
-
-# --- CORE EVENT HANDLER ---
+# --- CORE EVENT HANDLER WITH FIXED BULLETPROOF RAM DOWNLOADER ---
 @client.on(events.NewMessage())
 async def handle_userbot_media(event):
     message = event.message
@@ -192,9 +124,44 @@ async def handle_userbot_media(event):
     total_size = message.file.size
 
     if ext == '.zip':
-        status_msg = await event.reply("📥 **Feature 1: Initializing Turbo Parallel Connections...**")
+        status_msg = await event.reply("📥 **Feature 1: Initializing Turbo Connection to RAM Buffer...**")
         try:
-            buffer = await fast_parallel_download(client, message, status_msg, event)
+            buffer = io.BytesIO()
+            last_update_time = time.time()
+            start_time = time.time()
+            downloaded_bytes = 0
+            
+            # Streaming download with large 2MB buffers for maximum delivery speeds
+            async for chunk in client.iter_download(message.media, chunk_size=2 * 1024 * 1024):
+                buffer.write(chunk)
+                downloaded_bytes += len(chunk)
+                
+                now = time.time()
+                # Strictly throttled to 4.5s to completely safeguard against rate limiting blocks
+                if now - last_update_time > 4.5 or downloaded_bytes == total_size:
+                    pct = (downloaded_bytes / total_size) * 100
+                    bar = generate_progress_bar(pct)
+                    elapsed = now - start_time
+                    speed = downloaded_bytes / elapsed if elapsed > 0 else 0
+                    
+                    remaining_bytes = total_size - downloaded_bytes
+                    eta = remaining_bytes / speed if speed > 0 else 0
+                    
+                    status_text = (
+                        f"🚀 **Feature 1: Turbo-Downloading Zip to RAM...**\n"
+                        f"`[{bar}]` {pct:.2f}%\n\n"
+                        f"⚙️ **Progress:** {downloaded_bytes / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB\n"
+                        f"⚡ **Speed:** {(speed / (1024*1024)):.2f} MB/s\n"
+                        f"⏱️ **Elapsed Time:** {format_time(elapsed)}\n"
+                        f"⏳ **Estimated Remaining (ETA):** {format_time(eta)}"
+                    )
+                    try:
+                        await client.edit_message(event.chat_id, status_msg.id, status_text)
+                    except Exception:
+                        pass
+                    last_update_time = now
+            
+            buffer.seek(0)
             
             await client.edit_message(event.chat_id, status_msg.id, "⚙️ **Extracting layers and compiling deep file tree map...**")
             file_tree = extract_and_map_zip(buffer)
@@ -206,6 +173,7 @@ async def handle_userbot_media(event):
                 final_output = final_output[:4000] + "\n\n⚠️ *[Structure truncated]*"
             await client.edit_message(event.chat_id, status_msg.id, final_output)
             
+            # Clean memory space instantly
             buffer.close()
             del buffer
             gc.collect()
@@ -233,7 +201,7 @@ async def main():
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Parallel tracking engine fully corrected with auto-mapping location utilities. Try running it now!"
+            "Engine online. Multi-megabyte sequential download streams active with native object safety features!"
         )
         print("✅ Startup ping successfully dispatched.")
     except Exception as e:
