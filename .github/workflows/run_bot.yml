@@ -1,0 +1,38 @@
+name: Run Telegram Pipe Userbot
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # Allows you to manually start the bot from the GitHub UI
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python Environment
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Runtime Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install telethon aiohttp
+
+    - name: Reconstruct Session File and Boot Bot
+      env:
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+        BUNNY_LIBRARY_ID: ${{ secrets.BUNNY_LIBRARY_ID }}
+        BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+        TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
+      run: |
+        # Recreate the session file from your GitHub Secret string
+        echo "$TELEGRAM_SESSION" > bunny_pipeline_bot.session
+        
+        # Launch the userbot script
+        python main.py
