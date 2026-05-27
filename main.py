@@ -3,6 +3,7 @@ import io
 import time
 import zipfile
 import aiohttp
+import asyncio
 import gc  # Garbage collection to explicitly clean RAM
 from telethon import TelegramClient, events
 
@@ -30,11 +31,8 @@ def format_time(seconds):
     return f"{seconds // 3600:02d}h:{(seconds % 3600) // 60:02d}m:{seconds % 60:02d}s"
 
 def format_bytes(size_in_bytes):
-    """Converts raw bytes into a precise human-readable string with decimals."""
     if size_in_bytes == 0:
         return "0.00 B"
-    
-    # Standard decimal conversions
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if size_in_bytes < 1024.0:
             return f"{size_in_bytes:.2f} {unit}"
@@ -55,8 +53,13 @@ async def get_bunny_video_id(title, library_id, api_key):
                 return data.get("guid")
             return None
 
+# --- FIXED PIPED STREAM ENGINE WITH ASYNC TIMEOUT PROTECTION ---
 async def piped_upload_to_bunny(client, message, video_id, total_size, library_id, api_key, status_msg):
     url = f"https://video.bunnycdn.com/library/{library_id}/videos/{video_id}"
+    
+    # Give aiohttp a generous connection timeout pool so it never drops large media streams
+    timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_connect=60, sock_read=None)
+    
     headers = {
         "AccessKey": api_key,
         "Content-Type": "application/octet-stream",
@@ -64,58 +67,73 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
     }
     
     uploaded_bytes = 0
-    last_update_time = 0
     start_time = time.time()
-    
+    upload_finished = False
+
+    # Asynchronous background loop for status reporting to prevent pipeline stalling
+    async def status_ticker():
+        last_update_bytes = 0
+        while not upload_finished:
+            await asyncio.sleep(5.0)  # Safe message interval update threshold
+            if upload_finished or uploaded_bytes == last_update_bytes:
+                continue
+                
+            now = time.time()
+            pct = (uploaded_bytes / total_size) * 100
+            bar = generate_progress_bar(pct)
+            elapsed = now - start_time
+            speed = uploaded_bytes / elapsed if elapsed > 0 else 0
+            
+            remaining_bytes = total_size - uploaded_bytes
+            eta = remaining_bytes / speed if speed > 0 else 0
+            
+            status_text = (
+                f"⚡ **Feature 2: Piped Streaming Active**\n"
+                f"`[{bar}]` {pct:.2f}%\n\n"
+                f"⚙️ **Progress:** {uploaded_bytes / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB\n"
+                f"🚀 **Speed:** {(speed / (1024*1024)):.2f} MB/s\n"
+                f"⏱️ **Elapsed Time:** {format_time(elapsed)}\n"
+                f"⏳ **Estimated Remaining (ETA):** {format_time(eta)}"
+            )
+            try:
+                await client.edit_message(message.chat_id, status_msg.id, status_text)
+            except Exception:
+                pass
+            last_update_bytes = uploaded_bytes
+
     async def data_pipe_generator():
-        nonlocal uploaded_bytes, last_update_time
-        async for chunk in client.iter_download(message.media, chunk_size=1024 * 1024):
+        nonlocal uploaded_bytes
+        # Stream pieces from Telegram at full throttle without holding back the connection
+        async range for chunk in client.iter_download(message.media, chunk_size=1024 * 1024):
             yield chunk
             uploaded_bytes += len(chunk)
-            
-            now = time.time()
-            if now - last_update_time > 4.5 or uploaded_bytes == total_size:
-                pct = (uploaded_bytes / total_size) * 100
-                bar = generate_progress_bar(pct)
-                elapsed = now - start_time
-                speed = uploaded_bytes / elapsed if elapsed > 0 else 0
-                
-                remaining_bytes = total_size - uploaded_bytes
-                eta = remaining_bytes / speed if speed > 0 else 0
-                
-                status_text = (
-                    f"⚡ **Feature 2: Piped Streaming Active**\n"
-                    f"`[{bar}]` {pct:.2f}%\n\n"
-                    f"⚙️ **Progress:** {uploaded_bytes / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB\n"
-                    f"🚀 **Speed:** {(speed / (1024*1024)):.2f} MB/s\n"
-                    f"⏱️ **Elapsed Time:** {format_time(elapsed)}\n"
-                    f"⏳ **Estimated Remaining (ETA):** {format_time(eta)}"
-                )
-                try:
-                    await client.edit_message(message.chat_id, status_msg.id, status_text)
-                except Exception:
-                    pass
-                last_update_time = now
 
-    async with aiohttp.ClientSession() as session:
-        async with session.put(url, headers=headers, data=data_pipe_generator()) as resp:
-            return resp.status == 200
+    # Start the status updates in the background background task context
+    ticker_task = asyncio.create_task(status_ticker())
 
-# --- UPDATED EXTRACTION ENGINE WITH INDIVIDUAL FILE SIZE MAPPING ---
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.put(url, headers=headers, data=data_pipe_generator()) as resp:
+                upload_finished = True
+                return resp.status == 200
+    except Exception as e:
+        print(f"❌ Connection pipeline encountered an exception: {e}")
+        upload_finished = True
+        return False
+    finally:
+        upload_finished = True
+        ticker_task.cancel()  # Clean up background reporter thread safely
+
 def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
     output = ""
-    indent = "    " * indent_level
+    indent = "    " * indent_level
     
     try:
         with zipfile.ZipFile(file_bytes) as z:
             for member in z.infolist():
-                # Ignore pure directory structural markers
                 if member.is_dir():
                     continue
-                    
                 filename = member.filename
-                
-                # Check for inner nested zip containers
                 if filename.lower().endswith('.zip'):
                     output += f"{indent}{current_index[0]}. 📁 `{filename}` **(Nested Zip Found -> Extracting... )**\n"
                     current_index[0] += 1
@@ -123,7 +141,6 @@ def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
                         nested_bytes = io.BytesIO(nested_file.read())
                         output += extract_and_map_zip(nested_bytes, indent_level + 1, current_index)
                 else:
-                    # Fetch raw uncompressed entry size from zip headers and format it with decimals
                     readable_size = format_bytes(member.file_size)
                     output += f"{indent}{current_index[0]}. 📄 `{filename}` — `({readable_size})`\n"
                     current_index[0] += 1
@@ -155,7 +172,7 @@ async def handle_userbot_media(event):
                 downloaded_bytes += len(chunk)
                 
                 now = time.time()
-                if now - last_update_time > 4.5 or downloaded_bytes == total_size:
+                if now - last_update_time > 5.0 or downloaded_bytes == total_size:
                     pct = (downloaded_bytes / total_size) * 100
                     bar = generate_progress_bar(pct)
                     elapsed = now - start_time
@@ -179,10 +196,9 @@ async def handle_userbot_media(event):
                     last_update_time = now
             
             buffer.seek(0)
-            
             await client.edit_message(event.chat_id, status_msg.id, "⚙️ **Extracting layers and compiling deep size-mapped tree...**")
-            file_tree = extract_and_map_zip(buffer)
             
+            file_tree = extract_and_map_zip(buffer)
             final_output = f"📦 **Deep ZIP Extraction Map for:** `{filename}`\n\n"
             final_output += file_tree if file_tree.strip() else "📂 _(Archive empty)_"
             
@@ -208,7 +224,7 @@ async def handle_userbot_media(event):
         if success:
             await client.edit_message(event.chat_id, status_msg.id, f"✅ **Piped Upload Complete!**\n\n📛 **Name:** `{filename}`\n🆔 **ID:** `{video_id}`")
         else:
-            await client.edit_message(event.chat_id, status_msg.id, f"❌ **Pipeline failed mid-stream for:** `{filename}`")
+            await client.edit_message(event.chat_id, status_msg.id, f"❌ **Pipeline failed mid-stream or connection timed out.**")
 
 async def main():
     print("⚡ Userbot initializing connection...")
@@ -217,7 +233,7 @@ async def main():
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Precision size tracking added. Tree maps will now format individual file weights automatically!"
+            "Asynchronous ticker update routing activated. Connection dropout safeguards loaded."
         )
         print("✅ Startup ping successfully dispatched.")
     except Exception as e:
