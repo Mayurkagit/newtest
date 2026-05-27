@@ -53,11 +53,11 @@ async def get_bunny_video_id(title, library_id, api_key):
                 return data.get("guid")
             return None
 
-# --- FIXED PIPED STREAM ENGINE WITH ASYNC TIMEOUT PROTECTION ---
+# --- FIXED PIPED STREAM ENGINE WITH CORRECTED SYNTAX ---
 async def piped_upload_to_bunny(client, message, video_id, total_size, library_id, api_key, status_msg):
     url = f"https://video.bunnycdn.com/library/{library_id}/videos/{video_id}"
     
-    # Give aiohttp a generous connection timeout pool so it never drops large media streams
+    # Generous connection timeouts so large media items never drop out
     timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_connect=60, sock_read=None)
     
     headers = {
@@ -70,11 +70,11 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
     start_time = time.time()
     upload_finished = False
 
-    # Asynchronous background loop for status reporting to prevent pipeline stalling
+    # Asynchronous background loop for status updates (prevents pipeline stalling)
     async def status_ticker():
         last_update_bytes = 0
         while not upload_finished:
-            await asyncio.sleep(5.0)  # Safe message interval update threshold
+            await asyncio.sleep(5.0)  # Safe update interval for Telegram limits
             if upload_finished or uploaded_bytes == last_update_bytes:
                 continue
                 
@@ -103,12 +103,12 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
 
     async def data_pipe_generator():
         nonlocal uploaded_bytes
-        # Stream pieces from Telegram at full throttle without holding back the connection
-        async range for chunk in client.iter_download(message.media, chunk_size=1024 * 1024):
+        # FIXED: Removed the invalid "range" keyword
+        async for chunk in client.iter_download(message.media, chunk_size=1024 * 1024):
             yield chunk
             uploaded_bytes += len(chunk)
 
-    # Start the status updates in the background background task context
+    # Start the status updates in a background task
     ticker_task = asyncio.create_task(status_ticker())
 
     try:
@@ -122,7 +122,7 @@ async def piped_upload_to_bunny(client, message, video_id, total_size, library_i
         return False
     finally:
         upload_finished = True
-        ticker_task.cancel()  # Clean up background reporter thread safely
+        ticker_task.cancel()  # Clean up background task safely
 
 def extract_and_map_zip(file_bytes, indent_level=0, current_index=[1]):
     output = ""
@@ -233,7 +233,7 @@ async def main():
         await client.send_message(
             'me', 
             "🚀 **Userbot Pipeline Status: LIVE**\n\n"
-            "Asynchronous ticker update routing activated. Connection dropout safeguards loaded."
+            "Asynchronous loop syntax error corrected. Systems clear for processing!"
         )
         print("✅ Startup ping successfully dispatched.")
     except Exception as e:
